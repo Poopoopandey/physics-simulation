@@ -292,7 +292,12 @@ def start_glu():
     glViewport(0, 0, 800, 600)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    
+    glClearColor(0.05, 0.05, 0.08, 1.0)
+    camera_pos = Vec3(0.0, 1000.0, 5000.0)
+    camera_front = Vec3(0.0, 0.0, -1.0)
+    #camera_up = Vec3(0.0, 1.0, 0.0)
+    camera_front = (Vec3(0, 0, 0) - camera_pos).normalize()
+
     return window
 
 

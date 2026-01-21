@@ -106,38 +106,33 @@ def perspective(fovy, aspect, near, far):
     return mat
 
 def look_at(eye, center, up):
+    """Create view matrix"""
     f = (center - eye).normalize()
     s = f.cross(up).normalize()
     u = s.cross(f)
-
+    
     mat = np.identity(4, dtype=np.float32)
-
     mat[0, 0] = s.x
-    mat[0, 1] = s.y
-    mat[0, 2] = s.z
-
-    mat[1, 0] = u.x
+    mat[1, 0] = s.y
+    mat[2, 0] = s.z
+    mat[0, 1] = u.x
     mat[1, 1] = u.y
-    mat[1, 2] = u.z
-
-    mat[2, 0] = -f.x
-    mat[2, 1] = -f.y
+    mat[2, 1] = u.z
+    mat[0, 2] = -f.x
+    mat[1, 2] = -f.y
     mat[2, 2] = -f.z
-
-    mat[0, 3] = -s.dot(eye)
-    mat[1, 3] = -u.dot(eye)
-    mat[2, 3] = f.dot(eye)
-
+    mat[3, 0] = -s.dot(eye)
+    mat[3, 1] = -u.dot(eye)
+    mat[3, 2] = f.dot(eye)
     return mat
 
-
 def translate(mat, vec):
+    """Create translation matrix"""
     result = mat.copy()
-    result[0, 3] = vec.x
-    result[1, 3] = vec.y
-    result[2, 3] = vec.z
+    result[3, 0] = vec.x
+    result[3, 1] = vec.y
+    result[3, 2] = vec.z
     return result
-
 
 def radians(degrees):
     """Convert degrees to radians"""
@@ -145,15 +140,15 @@ def radians(degrees):
 
 # Global variables
 running = True
-pause = True
-camera_pos = Vec3(0.0, 0.0, 1.0)
+pause = False
+camera_pos = Vec3(0.0, 1000.0, 5000.0)
 camera_front = Vec3(0.0, 0.0, -1.0)
 camera_up = Vec3(0.0, 1.0, 0.0)
 last_x, last_y = 400.0, 300.0
 yaw, pitch = -90.0, 0.0
 delta_time, last_frame = 0.0, 0.0
 
-G = 6.6743e-11  # m^3 kg^-1 s^-2
+G = 6.6743e-11
 c = 299792458.0
 init_mass = 10**22
 size_ratio = 30000.0
@@ -182,7 +177,6 @@ class Object:
         self.vbo = None
         self.vertex_count = 0
         
-        # Generate vertices and create buffers
         vertices = self.draw()
         self.vertex_count = len(vertices)
         self.create_vbo_vao(vertices)
@@ -205,12 +199,10 @@ class Object:
                 v3 = self.spherical_to_cartesian(self.radius, theta2, phi1)
                 v4 = self.spherical_to_cartesian(self.radius, theta2, phi2)
                 
-                # Triangle 1
                 vertices.extend([v1.x, v1.y, v1.z])
                 vertices.extend([v2.x, v2.y, v2.z])
                 vertices.extend([v3.x, v3.y, v3.z])
                 
-                # Triangle 2
                 vertices.extend([v2.x, v2.y, v2.z])
                 vertices.extend([v4.x, v4.y, v4.z])
                 vertices.extend([v3.x, v3.y, v3.z])
@@ -293,11 +285,7 @@ def start_glu():
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glClearColor(0.05, 0.05, 0.08, 1.0)
-    camera_pos = Vec3(0.0, 1000.0, 5000.0)
-    camera_front = Vec3(0.0, 0.0, -1.0)
-    #camera_up = Vec3(0.0, 1.0, 0.0)
-    camera_front = (Vec3(0, 0, 0) - camera_pos).normalize()
-
+    
     return window
 
 
@@ -351,16 +339,13 @@ def key_callback(window, key, scancode, action, mods):
     if glfw.get_key(window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS:
         camera_pos = camera_pos - camera_up * camera_speed
     
-    if glfw.get_key(window, glfw.KEY_K) == glfw.PRESS:
-        pause = True
-    if glfw.get_key(window, glfw.KEY_K) == glfw.RELEASE:
-        pause = False
+    if key == glfw.KEY_K and action == glfw.PRESS:
+        pause = not pause
     
     if glfw.get_key(window, glfw.KEY_Q) == glfw.PRESS:
         running = False
         glfw.set_window_should_close(window, True)
     
-    # Object positioning
     if objs and objs[-1].initializing:
         if key == glfw.KEY_UP and (action == glfw.PRESS or action == glfw.REPEAT):
             if not shift_pressed:
@@ -374,7 +359,7 @@ def key_callback(window, key, scancode, action, mods):
                 objs[-1].position.z -= objs[-1].radius * 0.2
         if key == glfw.KEY_RIGHT and (action == glfw.PRESS or action == glfw.REPEAT):
             objs[-1].position.x += objs[-1].radius * 0.2
-        if key == glfw.KEY_LEFT and (action == glfw.REPEAT or action == glfw.REPEAT):
+        if key == glfw.KEY_LEFT and (action == glfw.PRESS or action == glfw.REPEAT):
             objs[-1].position.x -= objs[-1].radius * 0.2
 
 
@@ -448,7 +433,6 @@ def create_grid_vertices(size, divisions, objs):
     step = size / divisions
     half_size = size / 2.0
     
-    # X axis
     for y_step in range(3, 4):
         y = -half_size * 0.3 + y_step * step
         for z_step in range(divisions + 1):
@@ -458,7 +442,6 @@ def create_grid_vertices(size, divisions, objs):
                 x_end = x_start + step
                 vertices.extend([x_start, y, z, x_end, y, z])
     
-    # Z axis
     for x_step in range(divisions + 1):
         x = -half_size + x_step * step
         for y_step in range(3, 4):
@@ -471,51 +454,8 @@ def create_grid_vertices(size, divisions, objs):
     return vertices
 
 
-def update_grid_vertices(vertices, objs):
-    # Calculate center of mass
-    total_mass = 0.0
-    com_y = 0.0
-    
-    for obj in objs:
-        if obj.initializing:
-            continue
-        com_y += obj.mass * obj.position.y
-        total_mass += obj.mass
-    
-    if total_mass > 0:
-        com_y /= total_mass
-    
-    # Find original max Y
-    original_max_y = float('-inf')
-    for i in range(1, len(vertices), 3):
-        original_max_y = max(original_max_y, vertices[i])
-    
-    vertical_shift = com_y - original_max_y
-    print(f"vertical shift: {vertical_shift} | comY: {com_y} | originalmaxy: {original_max_y}")
-    
-    # Update vertices with gravitational warping
-    new_vertices = vertices.copy()
-    for i in range(0, len(new_vertices), 3):
-        vertex_pos = Vec3(new_vertices[i], new_vertices[i+1], new_vertices[i+2])
-        total_displacement_y = 0.0
-        
-        for obj in objs:
-            to_object = obj.get_pos() - vertex_pos
-            distance = to_object.length()
-            distance_m = distance * 1000.0
-            rs = (2 * G * obj.mass) / (c * c)
-            
-            if distance_m > rs:
-                dz = 2 * math.sqrt(rs * (distance_m - rs))
-                total_displacement_y += dz * 2.0
-        
-        new_vertices[i+1] = total_displacement_y - abs(vertical_shift)
-    
-    return new_vertices
-
-
 def main():
-    global camera_pos, delta_time, last_frame, objs, grid_vao, grid_vbo, pause
+    global camera_pos, camera_front, delta_time, last_frame, objs, grid_vao, grid_vbo, pause
     
     window = start_glu()
     if not window:
@@ -527,20 +467,19 @@ def main():
     object_color_loc = glGetUniformLocation(shader_program, "objectColor")
     glUseProgram(shader_program)
     
-    # Set up callbacks
     glfw.set_cursor_pos_callback(window, mouse_callback)
     glfw.set_scroll_callback(window, scroll_callback)
     glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED)
     glfw.set_key_callback(window, key_callback)
     glfw.set_mouse_button_callback(window, mouse_button_callback)
     
-    # Projection matrix
     projection = perspective(radians(45.0), 800.0 / 600.0, 0.1, 750000.0)
     projection_loc = glGetUniformLocation(shader_program, "projection")
     glUniformMatrix4fv(projection_loc, 1, GL_FALSE, projection)
-    camera_pos = Vec3(0.0, 1000.0, 5000.0)
     
-    # Initialize objects
+    camera_pos = Vec3(0.0, 1000.0, 5000.0)
+    camera_front = Vec3(0.0, 0.0, -1.0)
+    
     objs = [
         Object(Vec3(-5000, 650, -350), Vec3(0, 0, 1500), 5.97219*10**22, 5515, 
                Vec4(0.0, 1.0, 1.0, 1.0)),
@@ -550,9 +489,12 @@ def main():
                Vec4(1.0, 0.929, 0.176, 1.0), True),
     ]
     
+    print(f"Initialized {len(objs)} objects")
+    
     grid_vertices = create_grid_vertices(20000.0, 25, objs)
     grid_vao, grid_vbo = create_vbo_vao(grid_vertices)
     
+    frame_count = 0
     while not glfw.window_should_close(window) and running:
         current_frame = glfw.get_time()
         delta_time = current_frame - last_frame
@@ -562,7 +504,6 @@ def main():
         
         update_cam(shader_program, camera_pos)
         
-        # Handle object mass increase
         if objs and objs[-1].initializing:
             if glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS:
                 objs[-1].mass *= 1.0 + 1.0 * delta_time
@@ -570,23 +511,19 @@ def main():
                                   (4 * math.pi)) ** (1.0/3.0) / size_ratio
                 objs[-1].update_vertices()
         
-        # Draw grid
         glUseProgram(shader_program)
         glUniform4f(object_color_loc, 1.0, 1.0, 1.0, 0.25)
         glUniform1i(glGetUniformLocation(shader_program, "isGrid"), 1)
         glUniform1i(glGetUniformLocation(shader_program, "GLOW"), 0)
         
-        #grid_vertices = update_grid_vertices(grid_vertices, objs)
         grid_array = np.array(grid_vertices, dtype=np.float32)
         glBindBuffer(GL_ARRAY_BUFFER, grid_vbo)
         glBufferData(GL_ARRAY_BUFFER, grid_array.nbytes, grid_array, GL_DYNAMIC_DRAW)
         draw_grid(shader_program, grid_vao, len(grid_vertices))
         
-        # Draw objects
         for obj in objs:
             glUniform4f(object_color_loc, obj.color.r, obj.color.g, obj.color.b, obj.color.a)
             
-            # Calculate gravitational forces
             for obj2 in objs:
                 if obj2 is not obj and not obj.initializing and not obj2.initializing:
                     dx = obj2.get_pos().x - obj.get_pos().x
@@ -605,15 +542,12 @@ def main():
                         if not pause:
                             obj.accelerate(acc[0], acc[1], acc[2])
                         
-                        # Collision
                         obj.velocity = obj.velocity * obj.check_collision(obj2)
-                        print(f"radius: {obj.radius}")
             
             if obj.initializing:
                 obj.radius = ((3 * obj.mass / obj.density) / (4 * math.pi)) ** (1.0/3.0) / 1000000
                 obj.update_vertices()
             
-            # Update positions
             if not pause:
                 obj.update_pos()
             
@@ -632,8 +566,11 @@ def main():
         
         glfw.swap_buffers(window)
         glfw.poll_events()
+        
+        frame_count += 1
+        if frame_count == 60:
+            print(f"Simulation running, FPS: {1.0/delta_time:.1f}")
     
-    # Cleanup
     for obj in objs:
         obj.cleanup()
     

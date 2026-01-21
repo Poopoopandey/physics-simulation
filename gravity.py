@@ -41,7 +41,6 @@ void main() {
 }
 """
 
-# Simple vector/matrix classes
 class Vec3:
     def __init__(self, x=0.0, y=0.0, z=0.0):
         if isinstance(x, (list, tuple)):
@@ -94,7 +93,6 @@ class Vec4:
         self.a = self.w = float(w)
 
 def perspective(fovy, aspect, near, far):
-    """Create perspective projection matrix"""
     f = 1.0 / math.tan(fovy / 2.0)
     mat = np.identity(4, dtype=np.float32)
     mat[0, 0] = f / aspect
@@ -106,36 +104,34 @@ def perspective(fovy, aspect, near, far):
     return mat
 
 def look_at(eye, center, up):
-    """Create view matrix"""
     f = (center - eye).normalize()
     s = f.cross(up).normalize()
     u = s.cross(f)
     
-    mat = np.identity(4, dtype=np.float32)
-    mat[0, 0] = s.x
-    mat[1, 0] = s.y
-    mat[2, 0] = s.z
-    mat[0, 1] = u.x
-    mat[1, 1] = u.y
-    mat[2, 1] = u.z
-    mat[0, 2] = -f.x
-    mat[1, 2] = -f.y
-    mat[2, 2] = -f.z
-    mat[3, 0] = -s.dot(eye)
-    mat[3, 1] = -u.dot(eye)
-    mat[3, 2] = f.dot(eye)
-    return mat
+    result = np.identity(4, dtype=np.float32)
+    result[0][0] = s.x
+    result[1][0] = s.y
+    result[2][0] = s.z
+    result[0][1] = u.x
+    result[1][1] = u.y
+    result[2][1] = u.z
+    result[0][2] = -f.x
+    result[1][2] = -f.y
+    result[2][2] = -f.z
+    result[3][0] = -s.dot(eye)
+    result[3][1] = -u.dot(eye)
+    result[3][2] = f.dot(eye)
+    
+    return result
 
 def translate(mat, vec):
-    """Create translation matrix"""
     result = mat.copy()
-    result[3, 0] = vec.x
-    result[3, 1] = vec.y
-    result[3, 2] = vec.z
+    result[3][0] = vec.x
+    result[3][1] = vec.y
+    result[3][2] = vec.z
     return result
 
 def radians(degrees):
-    """Convert degrees to radians"""
     return degrees * math.pi / 180.0
 
 # Global variables
@@ -180,6 +176,8 @@ class Object:
         vertices = self.draw()
         self.vertex_count = len(vertices)
         self.create_vbo_vao(vertices)
+        
+        print(f"Created object at {self.position}, radius={self.radius}")
     
     def draw(self):
         vertices = []
@@ -341,6 +339,7 @@ def key_callback(window, key, scancode, action, mods):
     
     if key == glfw.KEY_K and action == glfw.PRESS:
         pause = not pause
+        print(f"Pause: {pause}")
     
     if glfw.get_key(window, glfw.KEY_Q) == glfw.PRESS:
         running = False
@@ -396,9 +395,11 @@ def mouse_button_callback(window, button, action, mods):
         if action == glfw.PRESS:
             objs.append(Object(Vec3(0.0, 0.0, 0.0), Vec3(0.0, 0.0, 0.0), init_mass))
             objs[-1].initializing = True
+            print("Creating new object")
         if action == glfw.RELEASE:
             objs[-1].initializing = False
             objs[-1].launched = True
+            print("Object launched")
     
     if objs and button == glfw.MOUSE_BUTTON_RIGHT and objs[-1].initializing:
         if action == glfw.PRESS or action == glfw.REPEAT:
@@ -480,6 +481,7 @@ def main():
     camera_pos = Vec3(0.0, 1000.0, 5000.0)
     camera_front = Vec3(0.0, 0.0, -1.0)
     
+    print("Initializing objects...")
     objs = [
         Object(Vec3(-5000, 650, -350), Vec3(0, 0, 1500), 5.97219*10**22, 5515, 
                Vec4(0.0, 1.0, 1.0, 1.0)),
@@ -490,9 +492,17 @@ def main():
     ]
     
     print(f"Initialized {len(objs)} objects")
+    print(f"Camera at: {camera_pos}")
+    print(f"Camera looking: {camera_front}")
+    print("\nControls:")
+    print("  W/A/S/D - Move camera")
+    print("  Mouse - Look around")
+    print("  K - Pause/unpause")
+    print("  Q - Quit")
     
     grid_vertices = create_grid_vertices(20000.0, 25, objs)
     grid_vao, grid_vbo = create_vbo_vao(grid_vertices)
+    print(f"Grid has {len(grid_vertices)//3} vertices")
     
     frame_count = 0
     while not glfw.window_should_close(window) and running:
@@ -511,6 +521,7 @@ def main():
                                   (4 * math.pi)) ** (1.0/3.0) / size_ratio
                 objs[-1].update_vertices()
         
+        # Draw grid
         glUseProgram(shader_program)
         glUniform4f(object_color_loc, 1.0, 1.0, 1.0, 0.25)
         glUniform1i(glGetUniformLocation(shader_program, "isGrid"), 1)
@@ -521,6 +532,7 @@ def main():
         glBufferData(GL_ARRAY_BUFFER, grid_array.nbytes, grid_array, GL_DYNAMIC_DRAW)
         draw_grid(shader_program, grid_vao, len(grid_vertices))
         
+        # Draw objects
         for obj in objs:
             glUniform4f(object_color_loc, obj.color.r, obj.color.g, obj.color.b, obj.color.a)
             
@@ -568,8 +580,8 @@ def main():
         glfw.poll_events()
         
         frame_count += 1
-        if frame_count == 60:
-            print(f"Simulation running, FPS: {1.0/delta_time:.1f}")
+        if frame_count == 120:
+            print(f"Running smoothly at {1.0/delta_time:.1f} FPS")
     
     for obj in objs:
         obj.cleanup()
@@ -582,4 +594,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

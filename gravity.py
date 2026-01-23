@@ -4,7 +4,6 @@ from OpenGL.GL.shaders import compileProgram, compileShader
 import numpy as np
 import math
 import ctypes
-from collections import deque
 
 vertex_shader_source = """
 #version 330 core
@@ -28,19 +27,16 @@ in vec3 Normal;
 out vec4 FragColor;
 uniform vec4 objectColor;
 uniform bool isGrid;
-uniform bool isTrail;
 uniform bool glow;
 void main() {
-    if (isGrid || isTrail) {
+    if (isGrid) {
         FragColor = objectColor;
     } else if (glow) {
-        FragColor = vec4(objectColor.rgb * 2.5, objectColor.a);
+        FragColor = vec4(objectColor.rgb * 3.0, objectColor.a);
     } else {
         vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
-        float diff = max(dot(Normal, lightDir), 0.2);
-        vec3 ambient = objectColor.rgb * 0.3;
-        vec3 diffuse = objectColor.rgb * diff * 0.7;
-        FragColor = vec4(ambient + diffuse, objectColor.a);
+        float diff = max(dot(Normal, lightDir), 0.3);
+        FragColor = vec4(objectColor.rgb * diff, objectColor.a);
     }
 }
 """
@@ -61,9 +57,6 @@ class Vec3:
     def __rmul__(self, scalar):
         return self.__mul__(scalar)
     
-    def __truediv__(self, scalar):
-        return Vec3(self.x / scalar, self.y / scalar, self.z / scalar)
-    
     def length(self):
         return math.sqrt(self.x**2 + self.y**2 + self.z**2)
     
@@ -82,9 +75,6 @@ class Vec3:
     
     def dot(self, other):
         return self.x * other.x + self.y * other.y + self.z * other.z
-    
-    def copy(self):
-        return Vec3(self.x, self.y, self.z)
 
 class Vec4:
     def __init__(self, x=0.0, y=0.0, z=0.0, w=1.0):
@@ -131,32 +121,28 @@ def translate(mat, vec):
     result[3][2] = vec.z
     return result
 
-# Global variables
+# Globals
 running = True
 pause = False
-show_trails = True
-camera_pos = Vec3(0.0, 8000.0, 20000.0)
-camera_front = Vec3(0.0, 0.0, -1.0)
+camera_pos = Vec3(0.0, 12000.0, 18000.0)
+camera_front = Vec3(0.0, -0.3, -1.0).normalize()
 camera_up = Vec3(0.0, 1.0, 0.0)
-last_x, last_y = 400.0, 300.0
-yaw, pitch = -90.0, -20.0
+last_x, last_y = 600.0, 400.0
+yaw, pitch = -90.0, -25.0
 delta_time, last_frame = 0.0, 0.0
 time_scale = 1.0
 
-G = 1.0
-c = 3000.0  # Speed of light for Schwarzschild radius calculations
+G = 2.0  # Increased for more dramatic effects
 objs = []
 
 class Object:
-    def __init__(self, position, velocity, mass, radius, color, glow=False, name=""):
+    def __init__(self, position, velocity, mass, radius, color, glow=False):
         self.position = position
         self.velocity = velocity
         self.mass = mass
         self.radius = radius
         self.color = color
         self.glow = glow
-        self.name = name
-        self.trail = deque(maxlen=150)
         
         self.vao = None
         self.vbo = None
@@ -168,7 +154,7 @@ class Object:
     
     def draw_sphere(self):
         vertices = []
-        stacks, sectors = 20, 20
+        stacks, sectors = 15, 15
         
         for i in range(stacks + 1):
             theta1 = (i / stacks) * math.pi
@@ -218,15 +204,6 @@ class Object:
         glEnableVertexAttribArray(0)
         glBindVertexArray(0)
     
-    def update(self, dt):
-        self.position = self.position + self.velocity * dt
-        if len(self.trail) == 0 or (self.position - self.trail[-1]).length() > self.radius * 0.5:
-            self.trail.append(self.position.copy())
-    
-    def apply_force(self, force_vec):
-        acceleration = force_vec * (1.0 / self.mass)
-        self.velocity = self.velocity + acceleration
-    
     def cleanup(self):
         if self.vao:
             glDeleteVertexArrays(1, [self.vao])
@@ -234,144 +211,69 @@ class Object:
             glDeleteBuffers(1, [self.vbo])
 
 
-def calculate_spacetime_warp(grid_pos, objects):
-    """
-    Calculate spacetime curvature at a grid point using Schwarzschild metric
-    Returns the warping displacement (how much the grid bends down)
-    """
-    total_warp = 0.0
+def calculate_warp(x, z, objects):
+    """Calculate how much spacetime warps at position (x, z)"""
+    warp = 0.0
     
     for obj in objects:
-        # Distance from grid point to object
-        dx = obj.position.x - grid_pos.x
-        dy = obj.position.y - grid_pos.y
-        dz = obj.position.z - grid_pos.z
-        distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+        dx = obj.position.x - x
+        dz = obj.position.z - z
+        distance = math.sqrt(dx*dx + dz*dz)
         
-        if distance > obj.radius * 2:  # Avoid singularity near object
-            # Schwarzschild radius: rs = 2GM/c²
-            rs = (2 * G * obj.mass) / (c * c)
-            
-            # Simplified curvature: creates a "well" around massive objects
-            # Using a modified formula for visualization
-            warp_depth = rs * 8000 / (1 + (distance / 2000) ** 2)
-            total_warp += warp_depth
+        # Avoid division by zero
+        if distance < obj.radius * 2:
+            distance = obj.radius * 2
+        
+        # Warping formula: deeper well for more massive objects
+        # Using inverse square with smooth falloff
+        warp_strength = (obj.mass * 15.0) / (distance + 500)
+        warp += warp_strength
     
-    return total_warp
+    return -warp  # Negative = downward warp
 
 
-def create_dynamic_grid(size=25000, divisions=40, objects=[]):
-    """Create a grid that warps based on mass distribution"""
+def create_warped_grid(size, divisions, objects):
+    """Create grid with spacetime warping"""
     vertices = []
-    colors = []
     step = size / divisions
     half = size / 2
     
-    # Create grid vertices with warping
+    # Calculate all grid points with warping
+    grid_points = []
     for i in range(divisions + 1):
+        row = []
         for j in range(divisions + 1):
             x = -half + j * step
             z = -half + i * step
-            
-            # Calculate warping at this point
-            grid_point = Vec3(x, 0, z)
-            warp = calculate_spacetime_warp(grid_point, objects)
-            y = -warp  # Bend the grid downward
-            
-            vertices.append([x, y, z])
-            
-            # Color based on curvature (deeper = more curved)
-            curvature_intensity = min(abs(warp) / 3000.0, 1.0)
-            colors.append([0.1 + curvature_intensity * 0.5, 
-                          0.1 + curvature_intensity * 0.5, 
-                          0.3 + curvature_intensity * 0.7])
+            y = calculate_warp(x, z, objects)  # Warp based on mass
+            row.append([x, y, z])
+        grid_points.append(row)
     
-    # Create line indices
-    lines = []
+    # Create lines connecting grid points
+    # Horizontal lines
     for i in range(divisions + 1):
         for j in range(divisions):
-            # Horizontal lines
-            idx1 = i * (divisions + 1) + j
-            idx2 = i * (divisions + 1) + j + 1
-            lines.append(vertices[idx1])
-            lines.append(vertices[idx2])
-            
-            # Vertical lines
-            if i < divisions:
-                idx1 = i * (divisions + 1) + j
-                idx2 = (i + 1) * (divisions + 1) + j
-                lines.append(vertices[idx1])
-                lines.append(vertices[idx2])
+            vertices.extend(grid_points[i][j])
+            vertices.extend(grid_points[i][j + 1])
     
-    vertices_flat = []
-    for line in lines:
-        vertices_flat.extend(line)
+    # Vertical lines
+    for i in range(divisions):
+        for j in range(divisions + 1):
+            vertices.extend(grid_points[i][j])
+            vertices.extend(grid_points[i + 1][j])
     
-    vertices_array = np.array(vertices_flat, dtype=np.float32)
-    
-    vao = glGenVertexArrays(1)
-    vbo = glGenBuffers(1)
-    
-    glBindVertexArray(vao)
-    glBindBuffer(GL_ARRAY_BUFFER, vbo)
-    glBufferData(GL_ARRAY_BUFFER, vertices_array.nbytes, vertices_array, GL_DYNAMIC_DRAW)
-    
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
-    glEnableVertexAttribArray(0)
-    glBindVertexArray(0)
-    
-    return vao, vbo, len(vertices_flat) // 3
-
-
-def draw_trail(shader, obj):
-    if len(obj.trail) < 2:
-        return
-    
-    vertices = []
-    for pos in obj.trail:
-        vertices.extend([pos.x, pos.y, pos.z])
-    
-    vertices_array = np.array(vertices, dtype=np.float32)
-    
-    vao = glGenVertexArrays(1)
-    vbo = glGenBuffers(1)
-    
-    glBindVertexArray(vao)
-    glBindBuffer(GL_ARRAY_BUFFER, vbo)
-    glBufferData(GL_ARRAY_BUFFER, vertices_array.nbytes, vertices_array, GL_DYNAMIC_DRAW)
-    
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
-    glEnableVertexAttribArray(0)
-    
-    model = np.identity(4, dtype=np.float32)
-    model_loc = glGetUniformLocation(shader, "model")
-    glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-    
-    trail_color = Vec4(obj.color.r * 0.6, obj.color.g * 0.6, obj.color.b * 0.6, 0.7)
-    color_loc = glGetUniformLocation(shader, "objectColor")
-    glUniform4f(color_loc, trail_color.r, trail_color.g, trail_color.b, trail_color.a)
-    
-    glUniform1i(glGetUniformLocation(shader, "isTrail"), 1)
-    glUniform1i(glGetUniformLocation(shader, "glow"), 0)
-    
-    glLineWidth(2.5)
-    glDrawArrays(GL_LINE_STRIP, 0, len(obj.trail))
-    
-    glDeleteVertexArrays(1, [vao])
-    glDeleteBuffers(1, [vbo])
+    return np.array(vertices, dtype=np.float32)
 
 
 def main():
     global camera_pos, camera_front, camera_up, delta_time, last_frame, objs, pause, running
-    global yaw, pitch, last_x, last_y, time_scale, show_trails
+    global yaw, pitch, last_x, last_y, time_scale
     
     if not glfw.init():
-        print("Failed to initialize GLFW")
         return
     
-    window = glfw.create_window(1400, 900, "Spacetime Curvature Visualization", None, None)
+    window = glfw.create_window(1200, 800, "SPACETIME WARPING - WORKING", None, None)
     if not window:
-        print("Failed to create window")
         glfw.terminate()
         return
     
@@ -379,7 +281,7 @@ def main():
     glEnable(GL_DEPTH_TEST)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glClearColor(0.01, 0.01, 0.03, 1.0)
+    glClearColor(0.0, 0.0, 0.02, 1.0)
     
     shader = compileProgram(
         compileShader(vertex_shader_source, GL_VERTEX_SHADER),
@@ -388,74 +290,80 @@ def main():
     
     glUseProgram(shader)
     
-    projection = perspective(math.radians(45.0), 1400.0/900.0, 1.0, 150000.0)
+    projection = perspective(math.radians(45.0), 1.5, 1.0, 100000.0)
     proj_loc = glGetUniformLocation(shader, "projection")
     glUniformMatrix4fv(proj_loc, 1, GL_FALSE, projection)
     
-    # Create objects
+    # Create objects with VISIBLE movement
+    print("\n" + "="*70)
+    print("🌌 SPACETIME CURVATURE SIMULATION 🌌".center(70))
+    print("="*70)
+    
     objs = [
-        Object(Vec3(0, 0, 0), Vec3(0, 0, 0), 15000, 1800, 
-               Vec4(1.0, 0.95, 0.4, 1.0), glow=True, name="Star"),
+        Object(Vec3(0, 0, 0), Vec3(0, 0, 0), 8000, 1500, 
+               Vec4(1.0, 0.95, 0.2, 1.0), glow=True),  # Central star
         
-        Object(Vec3(4000, 0, 0), Vec3(0, 0, 28), 15, 350,
-               Vec4(0.95, 0.4, 0.2, 1.0), name="Mercury"),
+        Object(Vec3(5000, 0, 0), Vec3(0, 0, 35), 50, 400,
+               Vec4(0.2, 0.6, 1.0, 1.0)),  # Fast blue planet
         
-        Object(Vec3(-7000, 0, 0), Vec3(0, 0, -22), 60, 550,
-               Vec4(0.2, 0.6, 0.95, 1.0), name="Earth"),
+        Object(Vec3(-7000, 0, 0), Vec3(0, 0, -28), 80, 500,
+               Vec4(1.0, 0.4, 0.2, 1.0)),  # Red planet
         
-        Object(Vec3(0, 0, 11000), Vec3(16, 0, 0), 250, 900,
-               Vec4(0.85, 0.65, 0.35, 1.0), name="Jupiter"),
-        
-        Object(Vec3(0, 0, 13000), Vec3(28, 0, 0), 8, 220,
-               Vec4(0.75, 0.75, 0.75, 1.0), name="Moon"),
+        Object(Vec3(0, 0, 10000), Vec3(20, 0, 0), 150, 700,
+               Vec4(0.8, 0.6, 0.3, 1.0)),  # Yellow planet
     ]
     
-    print("\n" + "="*60)
-    print("🌌  SPACETIME CURVATURE VISUALIZATION  🌌".center(60))
-    print("="*60)
-    print(f"\n✓ {len(objs)} celestial bodies created")
-    print("✓ Dynamic spacetime grid enabled")
-    print("\n" + "─"*60)
-    print("CONTROLS:".center(60))
-    print("─"*60)
-    print("  W/A/S/D/Space/Shift  →  Move camera")
-    print("  Mouse                →  Look around")
-    print("  K                    →  Pause/Resume physics")
-    print("  T                    →  Toggle orbital trails")
-    print("  + / -                →  Speed up / slow down time")
-    print("  R                    →  Reset camera position")
-    print("  Q / ESC              →  Quit simulation")
-    print("="*60 + "\n")
+    print(f"✓ Created {len(objs)} objects")
+    print(f"✓ Camera at {camera_pos}")
+    print("\n" + "─"*70)
+    print("WATCH: Grid bends DOWN around massive objects!")
+    print("       Planets orbit through CURVED spacetime!")
+    print("─"*70)
+    print("\nCONTROLS:")
+    print("  W/A/S/D + Space/Shift  →  Move camera")
+    print("  Mouse                  →  Look around")
+    print("  K                      →  Pause/Resume")
+    print("  +/-                    →  Speed up/slow down")
+    print("  Q                      →  Quit")
+    print("="*70 + "\n")
     
-    # Initialize grid
-    grid_vao, grid_vbo, grid_vertex_count = create_dynamic_grid(28000, 35, objs)
-    grid_update_counter = 0
+    # Grid setup
+    grid_size = 20000
+    grid_div = 30
+    grid_vao = glGenVertexArrays(1)
+    grid_vbo = glGenBuffers(1)
+    
+    def update_grid():
+        vertices = create_warped_grid(grid_size, grid_div, objs)
+        
+        glBindVertexArray(grid_vao)
+        glBindBuffer(GL_ARRAY_BUFFER, grid_vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_DYNAMIC_DRAW)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        glBindVertexArray(0)
+        
+        return len(vertices) // 3
+    
+    grid_vertex_count = update_grid()
     
     def key_callback(window, key, scancode, action, mods):
-        global camera_pos, pause, running, time_scale, show_trails, camera_front, yaw, pitch
+        global camera_pos, pause, running, time_scale, camera_front, yaw, pitch
         
         if action == glfw.PRESS:
             if key == glfw.KEY_K:
                 pause = not pause
-                print(f"⏯  {'PAUSED' if pause else 'RUNNING'}")
-            elif key == glfw.KEY_T:
-                show_trails = not show_trails
-                print(f"🎨 Trails: {'ON' if show_trails else 'OFF'}")
-            elif key == glfw.KEY_EQUAL or key == glfw.KEY_KP_ADD:
+                print(f"{'⏸ PAUSED' if pause else '▶ RUNNING'}")
+            elif key == glfw.KEY_EQUAL:
                 time_scale *= 1.5
-                print(f"⏩ Time scale: {time_scale:.2f}x")
-            elif key == glfw.KEY_MINUS or key == glfw.KEY_KP_SUBTRACT:
+                print(f"⏩ Speed: {time_scale:.1f}x")
+            elif key == glfw.KEY_MINUS:
                 time_scale = max(0.1, time_scale / 1.5)
-                print(f"⏪ Time scale: {time_scale:.2f}x")
-            elif key == glfw.KEY_R:
-                camera_pos = Vec3(0.0, 8000.0, 20000.0)
-                yaw, pitch = -90.0, -20.0
-                camera_front = Vec3(0.0, 0.0, -1.0)
-                print("📷 Camera reset")
-            elif key == glfw.KEY_Q or key == glfw.KEY_ESCAPE:
+                print(f"⏪ Speed: {time_scale:.1f}x")
+            elif key == glfw.KEY_Q:
                 running = False
         
-        speed = 600.0 * delta_time
+        speed = 800.0
         if glfw.get_key(window, glfw.KEY_W) == glfw.PRESS:
             camera_pos = camera_pos + camera_front * speed
         if glfw.get_key(window, glfw.KEY_S) == glfw.PRESS:
@@ -493,7 +401,7 @@ def main():
     model_loc = glGetUniformLocation(shader, "model")
     color_loc = glGetUniformLocation(shader, "objectColor")
     
-    frame_count = 0
+    frame = 0
     while not glfw.window_should_close(window) and running:
         current_frame = glfw.get_time()
         delta_time = current_frame - last_frame
@@ -504,59 +412,56 @@ def main():
         view = look_at(camera_pos, camera_pos + camera_front, camera_up)
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, view)
         
-        # Physics
+        # PHYSICS - Apply gravity and update positions
         if not pause:
-            dt = delta_time * time_scale
+            dt = delta_time * time_scale * 0.016  # Normalize to ~60fps equivalent
             
             for i, obj1 in enumerate(objs):
-                total_force = Vec3(0, 0, 0)
+                if obj1.glow:  # Star doesn't move
+                    continue
+                
+                force = Vec3(0, 0, 0)
                 
                 for j, obj2 in enumerate(objs):
                     if i != j:
-                        r_vec = obj2.position - obj1.position
-                        distance = r_vec.length()
+                        dx = obj2.position.x - obj1.position.x
+                        dy = obj2.position.y - obj1.position.y
+                        dz = obj2.position.z - obj1.position.z
+                        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
                         
-                        if distance > (obj1.radius + obj2.radius) * 0.1:
-                            force_magnitude = G * obj1.mass * obj2.mass / (distance * distance)
-                            force_direction = r_vec.normalize()
-                            force = force_direction * force_magnitude
-                            total_force = total_force + force
+                        if dist > obj1.radius + obj2.radius:
+                            f_mag = G * obj1.mass * obj2.mass / (dist * dist)
+                            force.x += (dx / dist) * f_mag / obj1.mass
+                            force.y += (dy / dist) * f_mag / obj1.mass
+                            force.z += (dz / dist) * f_mag / obj1.mass
                 
-                obj1.apply_force(total_force * dt)
+                # Update velocity and position
+                obj1.velocity.x += force.x * dt
+                obj1.velocity.y += force.y * dt
+                obj1.velocity.z += force.z * dt
+                
+                obj1.position.x += obj1.velocity.x * dt
+                obj1.position.y += obj1.velocity.y * dt
+                obj1.position.z += obj1.velocity.z * dt
             
-            for obj in objs:
-                obj.update(dt)
-            
-            # Update grid every few frames
-            grid_update_counter += 1
-            if grid_update_counter >= 3:
-                grid_update_counter = 0
-                glDeleteVertexArrays(1, [grid_vao])
-                glDeleteBuffers(1, [grid_vbo])
-                grid_vao, grid_vbo, grid_vertex_count = create_dynamic_grid(28000, 35, objs)
+            # Update grid every 2 frames for performance
+            if frame % 2 == 0:
+                grid_vertex_count = update_grid()
         
-        # Draw warped spacetime grid
+        # DRAW WARPED GRID
         glUniform1i(glGetUniformLocation(shader, "isGrid"), 1)
-        glUniform1i(glGetUniformLocation(shader, "isTrail"), 0)
         glUniform1i(glGetUniformLocation(shader, "glow"), 0)
-        glUniform4f(color_loc, 0.2, 0.3, 0.6, 0.4)
+        glUniform4f(color_loc, 0.3, 0.4, 0.8, 0.6)
         
         model = np.identity(4, dtype=np.float32)
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
         
-        glLineWidth(1.5)
+        glLineWidth(2.0)
         glBindVertexArray(grid_vao)
         glDrawArrays(GL_LINES, 0, grid_vertex_count)
         
-        # Draw trails
-        if show_trails:
-            for obj in objs:
-                if not obj.glow:
-                    draw_trail(shader, obj)
-        
-        # Draw objects
+        # DRAW OBJECTS
         glUniform1i(glGetUniformLocation(shader, "isGrid"), 0)
-        glUniform1i(glGetUniformLocation(shader, "isTrail"), 0)
         
         for obj in objs:
             model = translate(np.identity(4, dtype=np.float32), obj.position)
@@ -570,9 +475,9 @@ def main():
         glfw.swap_buffers(window)
         glfw.poll_events()
         
-        frame_count += 1
-        if frame_count == 90:
-            print(f"⚡ Running at {1.0/delta_time:.0f} FPS")
+        frame += 1
+        if frame == 60:
+            print(f"⚡ {1.0/delta_time:.0f} FPS - Grid warping active!")
     
     for obj in objs:
         obj.cleanup()

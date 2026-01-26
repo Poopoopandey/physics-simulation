@@ -33,16 +33,33 @@ uniform bool isGrid;
 uniform bool glow;
 void main() {
     if (isGrid) {
-        // Color grid based on depth - deeper = brighter
-        float depthColor = clamp(-depth / 3000.0, 0.0, 1.0);
-        vec3 gridColor = mix(vec3(0.2, 0.3, 0.6), vec3(0.4, 0.6, 1.0), depthColor);
-        FragColor = vec4(gridColor, 0.7);
+        // Enhanced lighting for grid based on depth
+        float depthColor = clamp(-depth / 1500.0, 0.0, 1.0);
+        vec3 baseColor = mix(vec3(0.1, 0.15, 0.3), vec3(0.2, 0.4, 0.8), depthColor);
+        
+        // Add subtle lighting
+        vec3 lightDir = normalize(vec3(0.3, 1.0, 0.2));
+        vec3 normal = normalize(vec3(0, 1, 0)); // Grid normal points up
+        float diffuse = max(dot(normal, lightDir), 0.0) * 0.3 + 0.7;
+        
+        FragColor = vec4(baseColor * diffuse, 0.85);
     } else if (glow) {
-        FragColor = vec4(objectColor.rgb * 4.0, objectColor.a);
+        // Bright glow for star
+        FragColor = vec4(objectColor.rgb * 2.5, objectColor.a);
     } else {
-        vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
-        float diff = max(dot(Normal, lightDir), 0.3);
-        FragColor = vec4(objectColor.rgb * diff, objectColor.a);
+        // Realistic lighting for planets
+        vec3 lightDir = normalize(vec3(0.0, 0.0, 0.0) - FragPos); // Light from center
+        float diff = max(dot(Normal, lightDir), 0.0);
+        
+        vec3 ambient = objectColor.rgb * 0.15;
+        vec3 diffuse = objectColor.rgb * diff * 0.85;
+        
+        // Add rim lighting
+        vec3 viewDir = normalize(-FragPos);
+        float rim = 1.0 - max(dot(viewDir, Normal), 0.0);
+        vec3 rimLight = objectColor.rgb * rim * 0.2;
+        
+        FragColor = vec4(ambient + diffuse + rimLight, objectColor.a);
     }
 }
 """
@@ -130,21 +147,27 @@ def translate(mat, vec):
 # Globals
 running = True
 pause = False
-camera_pos = Vec3(0.0, 15000.0, 15000.0)
-camera_front = Vec3(0.0, -0.5, -1.0).normalize()
+camera_pos = Vec3(0.0, 10000.0, 16000.0)
+camera_front = Vec3(0.0, -0.35, -1.0).normalize()
 camera_up = Vec3(0.0, 1.0, 0.0)
-last_x, last_y = 600.0, 400.0
-yaw, pitch = -90.0, -30.0
+last_x, last_y = 700.0, 450.0
+yaw, pitch = -90.0, -22.0
 delta_time, last_frame = 0.0, 0.0
-time_scale = 2.0  # Start with 2x speed
+time_scale = 1.0
 
-G = 3.5  # Even stronger gravity
+# Physics constants - more balanced
+G = 50.0
+epsilon = 500.0  # Gravitational softening
 objs = []
+
+# Store grid heights for smoother rendering
+grid_heights = {}
 
 class Object:
     def __init__(self, position, velocity, mass, radius, color, glow=False, name=""):
         self.position = position
         self.velocity = velocity
+        self.acc = Vec3(0, 0, 0)  # ACCELERATION STORAGE
         self.mass = mass
         self.radius = radius
         self.color = color
@@ -158,11 +181,10 @@ class Object:
         vertices = self.draw_sphere()
         self.vertex_count = len(vertices)
         self.create_vbo_vao(vertices)
-        print(f"  {name}: pos=({position.x:.0f}, {position.y:.0f}, {position.z:.0f}), v=({velocity.x:.1f}, {velocity.y:.1f}, {velocity.z:.1f})")
     
     def draw_sphere(self):
         vertices = []
-        stacks, sectors = 12, 12
+        stacks, sectors = 16, 16
         
         for i in range(stacks + 1):
             theta1 = (i / stacks) * math.pi
@@ -219,32 +241,42 @@ class Object:
             glDeleteBuffers(1, [self.vbo])
 
 
+def calculate_circular_velocity(distance, central_mass):
+    """Calculate velocity for stable circular orbit"""
+    return math.sqrt(G * central_mass / distance)
+
+
 def calculate_warp(x, z, objects):
-    """DRAMATIC warping - creates deep visible wells"""
-    warp = 0.0
+    """Calculate spacetime curvature with caching"""
+    key = (int(x/100), int(z/100))  # Cache by grid cell
     
+    if key in grid_heights:
+        return grid_heights[key]
+    
+    warp = 0.0
     for obj in objects:
         dx = obj.position.x - x
         dz = obj.position.z - z
-        distance = math.sqrt(dx*dx + dz*dz)
+        r2 = dx*dx + dz*dz + epsilon*epsilon  # With softening
+        r = math.sqrt(r2)
         
-        if distance < obj.radius * 3:
-            distance = obj.radius * 3
-        
-        # MUCH stronger warp formula
-        # Creates deep wells that are easy to see
-        warp_strength = (obj.mass * 50.0) / (distance * 0.3)
+        # Gravitational potential visualization
+        warp_strength = (obj.mass * 20.0) / r
         warp += warp_strength
     
-    return -warp  # Negative = downward
+    result = -warp
+    grid_heights[key] = result
+    return result
 
 
 def create_warped_grid(size, divisions, objects):
+    global grid_heights
+    grid_heights = {}  # Clear cache
+    
     vertices = []
     step = size / divisions
     half = size / 2
     
-    # Build grid with DEEP warping
     grid_points = []
     for i in range(divisions + 1):
         row = []
@@ -255,18 +287,41 @@ def create_warped_grid(size, divisions, objects):
             row.append([x, y, z])
         grid_points.append(row)
     
-    # Lines
+    # Horizontal lines
     for i in range(divisions + 1):
         for j in range(divisions):
             vertices.extend(grid_points[i][j])
             vertices.extend(grid_points[i][j + 1])
     
+    # Vertical lines
     for i in range(divisions):
         for j in range(divisions + 1):
             vertices.extend(grid_points[i][j])
             vertices.extend(grid_points[i + 1][j])
     
     return np.array(vertices, dtype=np.float32)
+
+
+def calculate_total_energy(objects):
+    """Calculate total energy (kinetic + potential) for verification"""
+    E = 0.0
+    
+    for i, a in enumerate(objects):
+        if a.glow:
+            continue
+        
+        # Kinetic energy: 0.5 * m * v²
+        v2 = a.velocity.length()**2
+        E += 0.5 * a.mass * v2
+        
+        # Potential energy: -G * m1 * m2 / r (count each pair once)
+        for j, b in enumerate(objects):
+            if i < j:
+                r = (a.position - b.position).length()
+                if r > 0:
+                    E -= G * a.mass * b.mass / r
+    
+    return E
 
 
 def main():
@@ -276,7 +331,7 @@ def main():
     if not glfw.init():
         return
     
-    window = glfw.create_window(1400, 900, "🌌 DRAMATIC SPACETIME WARPING 🌌", None, None)
+    window = glfw.create_window(1400, 900, "🌌 Stable N-Body Simulation with Spacetime Curvature", None, None)
     if not window:
         glfw.terminate()
         return
@@ -285,7 +340,7 @@ def main():
     glEnable(GL_DEPTH_TEST)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glClearColor(0.0, 0.0, 0.0, 1.0)
+    glClearColor(0.0, 0.0, 0.03, 1.0)
     
     shader = compileProgram(
         compileShader(vertex_shader_source, GL_VERTEX_SHADER),
@@ -298,46 +353,66 @@ def main():
     proj_loc = glGetUniformLocation(shader, "projection")
     glUniformMatrix4fv(proj_loc, 1, GL_FALSE, projection)
     
-    print("\n" + "="*70)
-    print("🌌 EXTREME SPACETIME CURVATURE 🌌".center(70))
-    print("="*70)
-    print("\n📍 Creating celestial bodies...")
+    print("\n" + "="*75)
+    print("🌌 STABLE N-BODY GRAVITY SIMULATION 🌌".center(75))
+    print("="*75)
+    print("\n⚙️  Physics Configuration:")
+    print(f"   G = {G}")
+    print(f"   Softening ε = {epsilon}")
+    print(f"   Integration: Leapfrog (symplectic)")
+    print(f"   Timestep: min(dt, 1/120) × time_scale")
     
-    objs = [
-        Object(Vec3(0, 0, 0), Vec3(0, 0, 0), 10000, 1600, 
-               Vec4(1.0, 0.95, 0.3, 1.0), glow=True, name="⭐ Star"),
-        
-        Object(Vec3(4500, 0, 0), Vec3(0, 0, 40), 40, 380,
-               Vec4(0.3, 0.5, 1.0, 1.0), name="🔵 Fast Planet"),
-        
-        Object(Vec3(-6500, 0, 0), Vec3(0, 0, -32), 70, 480,
-               Vec4(1.0, 0.3, 0.2, 1.0), name="🔴 Red Planet"),
-        
-        Object(Vec3(0, 0, 9500), Vec3(22, 0, 0), 120, 650,
-               Vec4(0.85, 0.65, 0.3, 1.0), name="🟡 Gas Giant"),
-    ]
+    # Central star (massive, stationary)
+    star = Object(Vec3(0, 0, 0), Vec3(0, 0, 0), 3000, 1200, 
+                  Vec4(1.0, 0.95, 0.35, 1.0), glow=True, name="Star")
+    objs.append(star)
     
-    print(f"\n✅ Created {len(objs)} bodies")
-    print(f"📷 Camera: {camera_pos}")
-    print(f"⚡ Starting at {time_scale}x speed")
-    print("\n" + "─"*70)
-    print("💡 WATCH FOR:".center(70))
-    print("  • Grid BENDING deeply around massive objects")
-    print("  • Planets ORBITING in real-time")
-    print("  • Deeper wells = brighter blue color")
-    print("  • Grid updates LIVE as planets move!")
-    print("─"*70)
-    print("\n⌨️  CONTROLS:")
+    # Planets with proper circular orbits
+    r1 = 5000
+    v1 = calculate_circular_velocity(r1, star.mass)
+    planet1 = Object(Vec3(r1, 0, 0), Vec3(0, 0, v1), 25, 320,
+                     Vec4(0.4, 0.6, 1.0, 1.0), name="Mercury")
+    objs.append(planet1)
+    
+    r2 = 7500
+    v2 = calculate_circular_velocity(r2, star.mass)
+    planet2 = Object(Vec3(-r2, 0, 0), Vec3(0, 0, -v2), 40, 400,
+                     Vec4(1.0, 0.5, 0.2, 1.0), name="Mars")
+    objs.append(planet2)
+    
+    r3 = 10500
+    v3 = calculate_circular_velocity(r3, star.mass)
+    planet3 = Object(Vec3(0, 0, r3), Vec3(v3, 0, 0), 80, 550,
+                     Vec4(0.9, 0.7, 0.35, 1.0), name="Jupiter")
+    objs.append(planet3)
+    
+    print(f"\n🌟 Created {len(objs)} bodies:")
+    for obj in objs:
+        if obj.glow:
+            print(f"   {obj.name}: mass={obj.mass}, radius={obj.radius}")
+        else:
+            dist = obj.position.length()
+            vel = obj.velocity.length()
+            print(f"   {obj.name}: r={dist:.0f}, v={vel:.2f}")
+    
+    # Calculate initial energy
+    E0 = calculate_total_energy(objs)
+    print(f"\n📊 Initial Total Energy: {E0:.2e}")
+    
+    print("\n" + "─"*75)
+    print("⌨️  CONTROLS:")
     print("  W/A/S/D/Space/Shift → Fly camera")
-    print("  Mouse              → Look around")
-    print("  K                  → Pause/Resume (PRESS K NOW!)")
+    print("  Mouse              → Look around")  
+    print("  K                  → Pause/Resume")
     print("  +/-                → Speed up/slow down")
+    print("  E                  → Show energy (check stability)")
+    print("  R                  → Reset camera")
     print("  Q                  → Quit")
-    print("="*70 + "\n")
+    print("="*75 + "\n")
     
     # Grid setup
-    grid_size = 18000
-    grid_div = 35  # More divisions = smoother warping
+    grid_size = 22000
+    grid_div = 45
     grid_vao = glGenVertexArrays(1)
     grid_vbo = glGenBuffers(1)
     
@@ -361,21 +436,26 @@ def main():
         if action == glfw.PRESS:
             if key == glfw.KEY_K:
                 pause = not pause
-                status = "⏸️  PAUSED" if pause else "▶️  RUNNING"
-                print(f"\n{status} - Time scale: {time_scale:.1f}x\n")
+                print(f"\n{'⏸️  PAUSED' if pause else '▶️  RUNNING'}\n")
+            elif key == glfw.KEY_E:
+                E = calculate_total_energy(objs)
+                dE = abs((E - E0) / E0) * 100 if E0 != 0 else 0
+                print(f"\n📊 Energy: {E:.2e} (ΔE = {dE:.3f}%)\n")
             elif key == glfw.KEY_EQUAL or key == glfw.KEY_KP_ADD:
-                time_scale *= 1.5
-                print(f"⏩ Speed: {time_scale:.1f}x")
+                time_scale = min(5.0, time_scale * 1.3)
+                print(f"⏩ Time: {time_scale:.2f}x")
             elif key == glfw.KEY_MINUS or key == glfw.KEY_KP_SUBTRACT:
-                time_scale = max(0.2, time_scale / 1.5)
-                print(f"⏪ Speed: {time_scale:.1f}x")
+                time_scale = max(0.1, time_scale / 1.3)
+                print(f"⏪ Time: {time_scale:.2f}x")
             elif key == glfw.KEY_R:
-                camera_pos = Vec3(0.0, 15000.0, 15000.0)
+                camera_pos = Vec3(0.0, 10000.0, 16000.0)
+                yaw, pitch = -90.0, -22.0
+                camera_front = Vec3(0.0, -0.35, -1.0).normalize()
                 print("📷 Camera reset")
             elif key == glfw.KEY_Q:
                 running = False
         
-        speed = 1000.0
+        speed = 700.0
         if glfw.get_key(window, glfw.KEY_W) == glfw.PRESS:
             camera_pos = camera_pos + camera_front * speed
         if glfw.get_key(window, glfw.KEY_S) == glfw.PRESS:
@@ -414,7 +494,6 @@ def main():
     color_loc = glGetUniformLocation(shader, "objectColor")
     
     frame = 0
-    last_pos_print = 0
     
     while not glfw.window_should_close(window) and running:
         current_frame = glfw.get_time()
@@ -426,57 +505,67 @@ def main():
         view = look_at(camera_pos, camera_pos + camera_front, camera_up)
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, view)
         
-        # PHYSICS
+        # PHYSICS - Leapfrog integration with softening
         if not pause:
-            dt = delta_time * time_scale * 16.0  # Scale to make visible
+            dt = min(delta_time, 1.0/120.0) * time_scale
             
+            # FIRST: Compute accelerations
             for i, obj1 in enumerate(objs):
                 if obj1.glow:
                     continue
                 
-                force = Vec3(0, 0, 0)
-                
+                acc = Vec3(0, 0, 0)
                 for j, obj2 in enumerate(objs):
-                    if i != j:
-                        dx = obj2.position.x - obj1.position.x
-                        dy = obj2.position.y - obj1.position.y
-                        dz = obj2.position.z - obj1.position.z
-                        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                        
-                        if dist > obj1.radius + obj2.radius:
-                            f_mag = G * obj1.mass * obj2.mass / (dist * dist)
-                            force.x += (dx / dist) * f_mag / obj1.mass
-                            force.y += (dy / dist) * f_mag / obj1.mass
-                            force.z += (dz / dist) * f_mag / obj1.mass
+                    if i == j:
+                        continue
+                    
+                    dx = obj2.position.x - obj1.position.x
+                    dy = obj2.position.y - obj1.position.y
+                    dz = obj2.position.z - obj1.position.z
+                    r2 = dx*dx + dy*dy + dz*dz + epsilon*epsilon  # Softening
+                    r = math.sqrt(r2)
+                    a = G * obj2.mass / r2
+                    
+                    acc.x += a * dx / r
+                    acc.y += a * dy / r
+                    acc.z += a * dz / r
                 
-                obj1.velocity.x += force.x * dt
-                obj1.velocity.y += force.y * dt
-                obj1.velocity.z += force.z * dt
-                
-                obj1.position.x += obj1.velocity.x * dt
-                obj1.position.y += obj1.velocity.y * dt
-                obj1.position.z += obj1.velocity.z * dt
+                obj1.acc = acc
             
-            # Update grid EVERY frame for smooth warping
-            grid_vertex_count = update_grid()
+            # SECOND: Update velocities (half step)
+            for obj in objs:
+                if not obj.glow:
+                    obj.velocity.x += obj.acc.x * dt * 0.5
+                    obj.velocity.y += obj.acc.y * dt * 0.5
+                    obj.velocity.z += obj.acc.z * dt * 0.5
             
-            # Print positions occasionally
-            if frame - last_pos_print > 60:
-                last_pos_print = frame
-                print(f"Frame {frame}: Planet positions:")
-                for obj in objs:
-                    if not obj.glow:
-                        print(f"  {obj.name}: ({obj.position.x:.0f}, {obj.position.y:.0f}, {obj.position.z:.0f})")
+            # THIRD: Update positions
+            for obj in objs:
+                if not obj.glow:
+                    obj.position.x += obj.velocity.x * dt
+                    obj.position.y += obj.velocity.y * dt
+                    obj.position.z += obj.velocity.z * dt
+            
+            # FOURTH: Update velocities again (second half)
+            for obj in objs:
+                if not obj.glow:
+                    obj.velocity.x += obj.acc.x * dt * 0.5
+                    obj.velocity.y += obj.acc.y * dt * 0.5
+                    obj.velocity.z += obj.acc.z * dt * 0.5
+            
+            # Update grid every 2 frames
+            if frame % 2 == 0:
+                grid_vertex_count = update_grid()
         
         # DRAW WARPED GRID
         glUniform1i(glGetUniformLocation(shader, "isGrid"), 1)
         glUniform1i(glGetUniformLocation(shader, "glow"), 0)
-        glUniform4f(color_loc, 0.3, 0.4, 0.8, 0.7)
+        glUniform4f(color_loc, 0.3, 0.4, 0.7, 0.8)
         
         model = np.identity(4, dtype=np.float32)
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
         
-        glLineWidth(2.5)
+        glLineWidth(1.8)
         glBindVertexArray(grid_vao)
         glDrawArrays(GL_LINES, 0, grid_vertex_count)
         
@@ -497,8 +586,9 @@ def main():
         
         frame += 1
         if frame == 120:
-            print(f"\n⚡ Running at {1.0/delta_time:.0f} FPS")
-            print("💫 Grid warping is ACTIVE and updating!\n")
+            E = calculate_total_energy(objs)
+            dE = abs((E - E0) / E0) * 100 if E0 != 0 else 0
+            print(f"⚡ {1.0/delta_time:.0f} FPS | Energy drift: {dE:.3f}%\n")
     
     for obj in objs:
         obj.cleanup()

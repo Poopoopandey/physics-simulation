@@ -5,645 +5,240 @@ import numpy as np
 import math
 import ctypes
 
-vertex_shader_source = """
+# =========================================================
+# SHADERS (simple + correct)
+# =========================================================
+
+VERTEX_SHADER = """
 #version 330 core
-layout(location=0) in vec3 aPos;
+layout (location = 0) in vec3 aPos;
+
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
-out vec3 FragPos;
-out vec3 Normal;
-out float depth;
+
 void main() {
-    vec4 worldPos = model * vec4(aPos, 1.0);
-    FragPos = worldPos.xyz;
-    Normal = normalize(aPos);
-    depth = worldPos.y;
-    gl_Position = projection * view * worldPos;
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
 }
 """
 
-fragment_shader_source = """
+FRAGMENT_SHADER = """
 #version 330 core
-in vec3 FragPos;
-in vec3 Normal;
-in float depth;
 out vec4 FragColor;
-uniform vec4 objectColor;
-uniform bool isGrid;
-uniform bool glow;
+uniform vec4 color;
+
 void main() {
-    if (isGrid) {
-        float depthColor = clamp(-depth / 2000.0, 0.0, 1.0);
-        vec3 baseColor = mix(vec3(0.15, 0.2, 0.35), vec3(0.3, 0.5, 0.9), depthColor);
-        FragColor = vec4(baseColor, 0.75);
-    } else if (glow) {
-        FragColor = vec4(objectColor.rgb * 3.0, objectColor.a);
-    } else {
-        vec3 lightDir = normalize(-FragPos);
-        float diff = max(dot(Normal, lightDir), 0.0);
-        vec3 ambient = objectColor.rgb * 0.2;
-        vec3 diffuse = objectColor.rgb * diff * 0.8;
-        FragColor = vec4(ambient + diffuse, objectColor.a);
-    }
+    FragColor = color;
 }
 """
+
+# =========================================================
+# MATH
+# =========================================================
 
 class Vec3:
-    def __init__(self, x=0.0, y=0.0, z=0.0):
+    def __init__(self, x=0, y=0, z=0):
         self.x, self.y, self.z = float(x), float(y), float(z)
-    
-    def __add__(self, other):
-        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
-    
-    def __sub__(self, other):
-        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
-    
-    def __mul__(self, scalar):
-        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
-    
-    def __rmul__(self, scalar):
-        return self.__mul__(scalar)
-    
-    def __truediv__(self, scalar):
-        return Vec3(self.x / scalar, self.y / scalar, self.z / scalar)
-    
+
+    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
+    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
+    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
+    def __truediv__(self, s): return Vec3(self.x/s, self.y/s, self.z/s)
+
     def length(self):
         return math.sqrt(self.x**2 + self.y**2 + self.z**2)
-    
+
     def normalize(self):
-        length = self.length()
-        if length > 0:
-            return Vec3(self.x / length, self.y / length, self.z / length)
-        return Vec3(0, 0, 0)
-    
-    def cross(self, other):
-        return Vec3(
-            self.y * other.z - self.z * other.y,
-            self.z * other.x - self.x * other.z,
-            self.x * other.y - self.y * other.x
-        )
-    
-    def dot(self, other):
-        return self.x * other.x + self.y * other.y + self.z * other.z
-    
-    def __repr__(self):
-        return f"({self.x:.1f}, {self.y:.1f}, {self.z:.1f})"
+        l = self.length()
+        return self / l if l > 0 else Vec3()
 
-class Vec4:
-    def __init__(self, x=0.0, y=0.0, z=0.0, w=1.0):
-        self.r = self.x = float(x)
-        self.g = self.y = float(y)
-        self.b = self.z = float(z)
-        self.a = self.w = float(w)
+# =========================================================
+# PHYSICS CONSTANTS (REALISTIC & STABLE)
+# =========================================================
 
-def perspective(fovy, aspect, near, far):
-    f = 1.0 / math.tan(fovy / 2.0)
-    mat = np.identity(4, dtype=np.float32)
-    mat[0, 0] = f / aspect
-    mat[1, 1] = f
-    mat[2, 2] = (far + near) / (near - far)
-    mat[2, 3] = (2.0 * far * near) / (near - far)
-    mat[3, 2] = -1.0
-    mat[3, 3] = 0.0
-    return mat
+G = 1.0                 # Normalized gravity constant
+SOFTENING = 200.0       # Prevents singularities
+DT = 1.0 / 240.0        # FIXED timestep (key for accuracy)
 
-def look_at(eye, center, up):
-    f = (center - eye).normalize()
-    s = f.cross(up).normalize()
-    u = s.cross(f)
-    
-    result = np.identity(4, dtype=np.float32)
-    result[0][0] = s.x
-    result[1][0] = s.y
-    result[2][0] = s.z
-    result[0][1] = u.x
-    result[1][1] = u.y
-    result[2][1] = u.z
-    result[0][2] = -f.x
-    result[1][2] = -f.y
-    result[2][2] = -f.z
-    result[3][0] = -s.dot(eye)
-    result[3][1] = -u.dot(eye)
-    result[3][2] = f.dot(eye)
-    return result
+# =========================================================
+# BODY CLASS
+# =========================================================
 
-def translate(vec):
-    mat = np.identity(4, dtype=np.float32)
-    mat[3][0] = vec.x
-    mat[3][1] = vec.y
-    mat[3][2] = vec.z
-    return mat
-
-# Globals
-running = True
-pause = False
-show_trails = True
-camera_pos = Vec3(0.0, 8000.0, 20000.0)
-camera_front = Vec3(0.0, -0.3, -1.0).normalize()
-camera_up = Vec3(0.0, 1.0, 0.0)
-last_x, last_y = 700.0, 450.0
-yaw, pitch = -90.0, -20.0
-delta_time, last_frame = 0.0, 0.0
-time_scale = 1.5
-
-# Physics
-G = 100.0  # Gravitational constant
-epsilon = 500.0  # Softening parameter
-objs = []
-grid_heights = {}
-
-class Object:
-    def __init__(self, position, velocity, mass, radius, color, glow=False, name="", fixed=False):
-        self.position = position
-        self.velocity = velocity
-        self.acc = Vec3(0, 0, 0)  # ACCELERATION STORAGE
+class Body:
+    def __init__(self, pos, vel, mass, radius, color, fixed=False):
+        self.pos = pos
+        self.vel = vel
+        self.acc = Vec3()
         self.mass = mass
         self.radius = radius
         self.color = color
-        self.glow = glow
-        self.name = name
         self.fixed = fixed
         self.trail = []
-        
-        self.vao = None
-        self.vbo = None
-        self.vertex_count = 0
-        
-        vertices = self.draw_sphere()
-        self.vertex_count = len(vertices)
-        self.create_vbo_vao(vertices)
-        
-        print(f"  {name}: mass={mass}, radius={radius}, fixed={fixed}")
-    
-    def draw_sphere(self):
-        vertices = []
-        stacks, sectors = 20, 20
-        
-        for i in range(stacks + 1):
-            theta1 = (i / stacks) * math.pi
-            theta2 = ((i + 1) / stacks) * math.pi
-            
+
+        self.vao, self.vbo, self.count = self._make_sphere()
+
+    def _make_sphere(self):
+        verts = []
+        stacks, sectors = 16, 16
+
+        for i in range(stacks):
+            t1 = i * math.pi / stacks
+            t2 = (i+1) * math.pi / stacks
             for j in range(sectors):
-                phi1 = (j / sectors) * 2 * math.pi
-                phi2 = ((j + 1) / sectors) * 2 * math.pi
-                
-                v1 = Vec3(
-                    self.radius * math.sin(theta1) * math.cos(phi1),
-                    self.radius * math.cos(theta1),
-                    self.radius * math.sin(theta1) * math.sin(phi1)
-                )
-                v2 = Vec3(
-                    self.radius * math.sin(theta1) * math.cos(phi2),
-                    self.radius * math.cos(theta1),
-                    self.radius * math.sin(theta1) * math.sin(phi2)
-                )
-                v3 = Vec3(
-                    self.radius * math.sin(theta2) * math.cos(phi1),
-                    self.radius * math.cos(theta2),
-                    self.radius * math.sin(theta2) * math.sin(phi1)
-                )
-                v4 = Vec3(
-                    self.radius * math.sin(theta2) * math.cos(phi2),
-                    self.radius * math.cos(theta2),
-                    self.radius * math.sin(theta2) * math.sin(phi2)
-                )
-                
-                vertices.extend([v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, v3.x, v3.y, v3.z])
-                vertices.extend([v2.x, v2.y, v2.z, v4.x, v4.y, v4.z, v3.x, v3.y, v3.z])
-        
-        return vertices
-    
-    def create_vbo_vao(self, vertices):
-        vertices_array = np.array(vertices, dtype=np.float32)
-        
-        self.vao = glGenVertexArrays(1)
-        self.vbo = glGenBuffers(1)
-        
-        glBindVertexArray(self.vao)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertices_array.nbytes, vertices_array, GL_STATIC_DRAW)
-        
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
+                p1 = j * 2*math.pi / sectors
+                p2 = (j+1) * 2*math.pi / sectors
+
+                def v(t, p):
+                    return [
+                        self.radius * math.sin(t)*math.cos(p),
+                        self.radius * math.cos(t),
+                        self.radius * math.sin(t)*math.sin(p)
+                    ]
+
+                verts += v(t1,p1)+v(t2,p1)+v(t2,p2)
+                verts += v(t1,p1)+v(t2,p2)+v(t1,p2)
+
+        verts = np.array(verts, dtype=np.float32)
+        vao = glGenVertexArrays(1)
+        vbo = glGenBuffers(1)
+
+        glBindVertexArray(vao)
+        glBindBuffer(GL_ARRAY_BUFFER, vbo)
+        glBufferData(GL_ARRAY_BUFFER, verts.nbytes, verts, GL_STATIC_DRAW)
+        glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,12,ctypes.c_void_p(0))
         glEnableVertexAttribArray(0)
-        glBindVertexArray(0)
-    
-    def cleanup(self):
-        if self.vao:
-            glDeleteVertexArrays(1, [self.vao])
-        if self.vbo:
-            glDeleteBuffers(1, [self.vbo])
 
+        return vao, vbo, len(verts)//3
 
-def calculate_warp(x, z, objects):
-    """Calculate spacetime curvature with caching"""
-    key = (int(x/200), int(z/200))
-    if key in grid_heights:
-        return grid_heights[key]
-    
-    warp = 0.0
-    for obj in objects:
-        dx = obj.position.x - x
-        dz = obj.position.z - z
-        r2 = dx*dx + dz*dz + epsilon*epsilon
-        r = math.sqrt(r2)
-        warp_strength = (obj.mass * 25.0) / r
-        warp += warp_strength
-    
-    result = -warp
-    grid_heights[key] = result
-    return result
+# =========================================================
+# PHYSICS CORE (THIS IS THE IMPORTANT PART)
+# =========================================================
 
+def compute_acceleration(bodies):
+    for b in bodies:
+        b.acc = Vec3()
 
-def create_warped_grid(size, divisions, objects):
-    """Create grid with spacetime warping"""
-    global grid_heights
-    grid_heights = {}
-    
-    vertices = []
-    step = size / divisions
-    half = size / 2
-    
-    grid_points = []
-    for i in range(divisions + 1):
-        row = []
-        for j in range(divisions + 1):
-            x = -half + j * step
-            z = -half + i * step
-            y = calculate_warp(x, z, objects)
-            row.append([x, y, z])
-        grid_points.append(row)
-    
-    # Horizontal lines
-    for i in range(divisions + 1):
-        for j in range(divisions):
-            vertices.extend(grid_points[i][j])
-            vertices.extend(grid_points[i][j + 1])
-    
-    # Vertical lines
-    for i in range(divisions):
-        for j in range(divisions + 1):
-            vertices.extend(grid_points[i][j])
-            vertices.extend(grid_points[i + 1][j])
-    
-    return np.array(vertices, dtype=np.float32)
+    for i, a in enumerate(bodies):
+        if a.fixed: continue
+        for j, b in enumerate(bodies):
+            if i == j: continue
 
+            r = b.pos - a.pos
+            d2 = r.x*r.x + r.y*r.y + r.z*r.z + SOFTENING*SOFTENING
+            inv_r3 = 1.0 / (d2 * math.sqrt(d2))
+            a.acc += r * (G * b.mass * inv_r3)
 
-def calculate_total_energy(objects):
-    """Calculate total system energy for verification"""
-    E = 0.0
-    
-    for i, a in enumerate(objects):
-        if a.fixed:
-            continue
-        
-        # Kinetic energy: 0.5 * m * v²
-        v2 = a.velocity.length()**2
-        E += 0.5 * a.mass * v2
-        
-        # Potential energy: -G * m1 * m2 / r
-        for j, b in enumerate(objects):
-            if i < j:
-                r = (a.position - b.position).length()
-                if r > 0:
-                    E -= G * a.mass * b.mass / r
-    
-    return E
+def step_physics(bodies):
+    # Velocity Verlet (symplectic, energy-stable)
 
+    compute_acceleration(bodies)
 
-def draw_trail(shader, obj, model_loc, color_loc):
-    """Draw orbital trail for object"""
-    if len(obj.trail) < 2:
-        return
-    
-    vertices = []
-    for pos in obj.trail:
-        vertices.extend([pos.x, pos.y, pos.z])
-    
-    vertices_array = np.array(vertices, dtype=np.float32)
-    
-    vao = glGenVertexArrays(1)
-    vbo = glGenBuffers(1)
-    
-    glBindVertexArray(vao)
-    glBindBuffer(GL_ARRAY_BUFFER, vbo)
-    glBufferData(GL_ARRAY_BUFFER, vertices_array.nbytes, vertices_array, GL_DYNAMIC_DRAW)
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
-    glEnableVertexAttribArray(0)
-    
-    model = np.identity(4, dtype=np.float32)
-    glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-    
-    trail_color = Vec4(obj.color.r * 0.6, obj.color.g * 0.6, obj.color.b * 0.6, 0.7)
-    glUniform4f(color_loc, trail_color.r, trail_color.g, trail_color.b, trail_color.a)
-    glUniform1i(glGetUniformLocation(shader, "isGrid"), 1)
-    glUniform1i(glGetUniformLocation(shader, "glow"), 0)
-    
-    glLineWidth(2.5)
-    glDrawArrays(GL_LINE_STRIP, 0, len(obj.trail))
-    
-    glDeleteVertexArrays(1, [vao])
-    glDeleteBuffers(1, [vbo])
+    for b in bodies:
+        if not b.fixed:
+            b.vel += b.acc * (DT * 0.5)
 
+    for b in bodies:
+        if not b.fixed:
+            b.pos += b.vel * DT
+            b.trail.append(Vec3(b.pos.x, b.pos.y, b.pos.z))
+            if len(b.trail) > 300:
+                b.trail.pop(0)
+
+    compute_acceleration(bodies)
+
+    for b in bodies:
+        if not b.fixed:
+            b.vel += b.acc * (DT * 0.5)
+
+# =========================================================
+# CAMERA
+# =========================================================
+
+def look_at(eye, center, up):
+    f = (center-eye).normalize()
+    s = Vec3(
+        f.y*up.z - f.z*up.y,
+        f.z*up.x - f.x*up.z,
+        f.x*up.y - f.y*up.x
+    ).normalize()
+    u = Vec3(
+        s.y*f.z - s.z*f.y,
+        s.z*f.x - s.x*f.z,
+        s.x*f.y - s.y*f.x
+    )
+
+    M = np.identity(4, dtype=np.float32)
+    M[0][:3] = [s.x, u.x, -f.x]
+    M[1][:3] = [s.y, u.y, -f.y]
+    M[2][:3] = [s.z, u.z, -f.z]
+    M[3][0] = -s.x*eye.x - s.y*eye.y - s.z*eye.z
+    M[3][1] = -u.x*eye.x - u.y*eye.y - u.z*eye.z
+    M[3][2] = f.x*eye.x + f.y*eye.y + f.z*eye.z
+    return M
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
-    global camera_pos, camera_front, camera_up, delta_time, last_frame, objs, pause, running
-    global yaw, pitch, last_x, last_y, time_scale, show_trails
-    
-    if not glfw.init():
-        print("Failed to initialize GLFW")
-        return
-    
-    window = glfw.create_window(1400, 900, "🌌 N-Body Gravity Simulation - Complete", None, None)
-    if not window:
-        print("Failed to create window")
-        glfw.terminate()
-        return
-    
+    glfw.init()
+    window = glfw.create_window(1200, 800, "Physically Correct Gravity", None, None)
     glfw.make_context_current(window)
     glEnable(GL_DEPTH_TEST)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glClearColor(0.0, 0.0, 0.05, 1.0)
-    
+
     shader = compileProgram(
-        compileShader(vertex_shader_source, GL_VERTEX_SHADER),
-        compileShader(fragment_shader_source, GL_FRAGMENT_SHADER)
+        compileShader(VERTEX_SHADER, GL_VERTEX_SHADER),
+        compileShader(FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
     )
-    
-    glUseProgram(shader)
-    
-    projection = perspective(math.radians(45.0), 1400.0/900.0, 1.0, 200000.0)
-    proj_loc = glGetUniformLocation(shader, "projection")
-    glUniformMatrix4fv(proj_loc, 1, GL_FALSE, projection)
-    
-    print("\n" + "="*75)
-    print("🌌 N-BODY GRAVITY SIMULATION 🌌".center(75))
-    print("="*75)
-    print(f"\n⚙️  Physics Configuration:")
-    print(f"  G = {G}")
-    print(f"  Softening ε = {epsilon}")
-    print(f"  Integration: Leapfrog (symplectic)")
-    print(f"  Timestep: dt = min(Δt, 1/120) × time_scale")
-    print(f"\n📍 Creating celestial bodies...")
-    
-    # Central star (FIXED, but exerts gravity)
-    star = Object(Vec3(0, 0, 0), Vec3(0, 0, 0), 5000, 1400, 
-                  Vec4(1.0, 0.95, 0.35, 1.0), glow=True, name="Star", fixed=True)
-    objs.append(star)
-    
-    # Calculate proper circular orbital velocities
-    def calc_v(r, M):
-        return math.sqrt(G * M / r)
-    
-    # Inner fast planet
-    r1 = 4500
-    v1 = calc_v(r1, star.mass)
-    planet1 = Object(Vec3(r1, 0, 0), Vec3(0, 0, v1), 30, 350,
-                     Vec4(0.4, 0.6, 1.0, 1.0), name="Mercury", fixed=False)
-    objs.append(planet1)
-    print(f"    Orbital velocity at r={r1}: v={v1:.2f}")
-    
-    # Middle planet
-    r2 = 7500
-    v2 = calc_v(r2, star.mass)
-    planet2 = Object(Vec3(-r2, 0, 0), Vec3(0, 0, -v2), 50, 450,
-                     Vec4(1.0, 0.5, 0.2, 1.0), name="Earth", fixed=False)
-    objs.append(planet2)
-    print(f"    Orbital velocity at r={r2}: v={v2:.2f}")
-    
-    # Outer slow planet
-    r3 = 11000
-    v3 = calc_v(r3, star.mass)
-    planet3 = Object(Vec3(0, 0, r3), Vec3(v3, 0, 0), 100, 600,
-                     Vec4(0.85, 0.65, 0.3, 1.0), name="Jupiter", fixed=False)
-    objs.append(planet3)
-    print(f"    Orbital velocity at r={r3}: v={v3:.2f}")
-    
-    E0 = calculate_total_energy(objs)
-    print(f"\n📊 Initial Total Energy: {E0:.4e}")
-    
-    print("\n" + "─"*75)
-    print("⌨️  CONTROLS:")
-    print("  W/A/S/D/Space/Shift → Camera movement")
-    print("  Mouse              → Look around")
-    print("  K                  → Pause/Resume")
-    print("  T                  → Toggle trails")
-    print("  +/-                → Speed up/slow down")
-    print("  E                  → Check energy conservation")
-    print("  R                  → Reset camera")
-    print("  Q/ESC              → Quit")
-    print("="*75 + "\n")
-    
-    # Grid setup
-    grid_size = 25000
-    grid_div = 50
-    grid_vao = glGenVertexArrays(1)
-    grid_vbo = glGenBuffers(1)
-    
-    def update_grid():
-        vertices = create_warped_grid(grid_size, grid_div, objs)
-        glBindVertexArray(grid_vao)
-        glBindBuffer(GL_ARRAY_BUFFER, grid_vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_DYNAMIC_DRAW)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 12, ctypes.c_void_p(0))
-        glEnableVertexAttribArray(0)
-        glBindVertexArray(0)
-        return len(vertices) // 3
-    
-    grid_vertex_count = update_grid()
-    print(f"✅ Grid initialized with {grid_vertex_count} vertices")
-    print(f"✅ Simulation starting at {time_scale:.1f}x speed\n")
-    
-    def key_callback(window, key, scancode, action, mods):
-        global camera_pos, pause, running, time_scale, camera_front, yaw, pitch, show_trails
-        
-        if action == glfw.PRESS:
-            if key == glfw.KEY_K:
-                pause = not pause
-                print(f"{'⏸ PAUSED' if pause else '▶ RUNNING'} (speed: {time_scale:.1f}x)")
-            elif key == glfw.KEY_T:
-                show_trails = not show_trails
-                print(f"Trails: {'ON' if show_trails else 'OFF'}")
-            elif key == glfw.KEY_E:
-                E = calculate_total_energy(objs)
-                dE = abs((E - E0) / E0) * 100 if E0 != 0 else 0
-                print(f"\n📊 Energy: {E:.4e}, Drift: {dE:.4f}%")
-                for obj in objs:
-                    if not obj.fixed:
-                        r = obj.position.length()
-                        v = obj.velocity.length()
-                        print(f"  {obj.name}: r={r:.0f}, v={v:.2f}, pos={obj.position}")
-                print()
-            elif key == glfw.KEY_EQUAL:
-                time_scale = min(5.0, time_scale * 1.3)
-                print(f"⏩ Speed: {time_scale:.1f}x")
-            elif key == glfw.KEY_MINUS:
-                time_scale = max(0.1, time_scale / 1.3)
-                print(f"⏪ Speed: {time_scale:.1f}x")
-            elif key == glfw.KEY_R:
-                camera_pos = Vec3(0.0, 8000.0, 20000.0)
-                yaw, pitch = -90.0, -20.0
-                camera_front = Vec3(0.0, -0.3, -1.0).normalize()
-                print("📷 Camera reset")
-            elif key == glfw.KEY_Q or key == glfw.KEY_ESCAPE:
-                running = False
-        
-        speed = 800.0
-        if glfw.get_key(window, glfw.KEY_W) == glfw.PRESS:
-            camera_pos = camera_pos + camera_front * speed
-        if glfw.get_key(window, glfw.KEY_S) == glfw.PRESS:
-            camera_pos = camera_pos - camera_front * speed
-        if glfw.get_key(window, glfw.KEY_A) == glfw.PRESS:
-            camera_pos = camera_pos - camera_front.cross(camera_up).normalize() * speed
-        if glfw.get_key(window, glfw.KEY_D) == glfw.PRESS:
-            camera_pos = camera_pos + camera_front.cross(camera_up).normalize() * speed
-        if glfw.get_key(window, glfw.KEY_SPACE) == glfw.PRESS:
-            camera_pos = camera_pos + camera_up * speed
-        if glfw.get_key(window, glfw.KEY_LEFT_SHIFT) == glfw.PRESS:
-            camera_pos = camera_pos - camera_up * speed
-    
-    def mouse_callback(window, xpos, ypos):
-        global last_x, last_y, yaw, pitch, camera_front
-        
-        xoffset = (xpos - last_x) * 0.1
-        yoffset = (last_y - ypos) * 0.1
-        last_x, last_y = xpos, ypos
-        
-        yaw += xoffset
-        pitch = max(min(pitch + yoffset, 89.0), -89.0)
-        
-        camera_front = Vec3(
-            math.cos(math.radians(yaw)) * math.cos(math.radians(pitch)),
-            math.sin(math.radians(pitch)),
-            math.sin(math.radians(yaw)) * math.cos(math.radians(pitch))
-        ).normalize()
-    
-    glfw.set_key_callback(window, key_callback)
-    glfw.set_cursor_pos_callback(window, mouse_callback)
-    glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED)
-    
-    view_loc = glGetUniformLocation(shader, "view")
-    model_loc = glGetUniformLocation(shader, "model")
-    color_loc = glGetUniformLocation(shader, "objectColor")
-    
-    frame = 0
-    
-    while not glfw.window_should_close(window) and running:
-        current_frame = glfw.get_time()
-        delta_time = current_frame - last_frame
-        last_frame = current_frame
-        
+
+    # Camera
+    cam_pos = Vec3(0, 6000, 16000)
+    cam_front = Vec3(0, -0.3, -1).normalize()
+    cam_up = Vec3(0,1,0)
+
+    # Bodies
+    bodies = []
+
+    star = Body(Vec3(0,0,0), Vec3(), 5000, 1000, (1,1,0,1), fixed=True)
+    bodies.append(star)
+
+    def circular_v(r):
+        return math.sqrt(G * star.mass / r)
+
+    bodies.append(Body(Vec3(5000,0,0), Vec3(0,0,circular_v(5000)), 20, 250, (0.4,0.6,1,1)))
+    bodies.append(Body(Vec3(-8000,0,0), Vec3(0,0,-circular_v(8000)), 40, 350, (1,0.4,0.3,1)))
+    bodies.append(Body(Vec3(0,0,11000), Vec3(circular_v(11000),0,0), 80, 450, (0.9,0.8,0.4,1)))
+
+    projection = np.identity(4, dtype=np.float32)
+    f = 1/math.tan(math.radians(45)/2)
+    projection[0][0]=f*(800/1200)
+    projection[1][1]=f
+    projection[2][2]=-1
+    projection[2][3]=-1
+    projection[3][2]=-0.2
+
+    while not glfw.window_should_close(window):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        
-        view = look_at(camera_pos, camera_pos + camera_front, camera_up)
-        glUniformMatrix4fv(view_loc, 1, GL_FALSE, view)
-        
-        # PHYSICS - Leapfrog Integration
-        if not pause:
-            dt = min(delta_time, 1.0/120.0) * time_scale
-            
-            # STEP 1: Compute accelerations for all non-fixed objects
-            for i, obj1 in enumerate(objs):
-                if obj1.fixed:
-                    continue
-                
-                acc = Vec3(0, 0, 0)
-                for j, obj2 in enumerate(objs):
-                    if i == j:
-                        continue
-                    
-                    dx = obj2.position.x - obj1.position.x
-                    dy = obj2.position.y - obj1.position.y
-                    dz = obj2.position.z - obj1.position.z
-                    r2 = dx*dx + dy*dy + dz*dz + epsilon*epsilon  # Softening
-                    r = math.sqrt(r2)
-                    a = G * obj2.mass / r2
-                    
-                    acc.x += a * dx / r
-                    acc.y += a * dy / r
-                    acc.z += a * dz / r
-                
-                obj1.acc = acc
-            
-            # STEP 2: Update velocities (half step)
-            for obj in objs:
-                if not obj.fixed:
-                    obj.velocity.x += obj.acc.x * dt * 0.5
-                    obj.velocity.y += obj.acc.y * dt * 0.5
-                    obj.velocity.z += obj.acc.z * dt * 0.5
-            
-            # STEP 3: Update positions
-            for obj in objs:
-                if not obj.fixed:
-                    obj.position.x += obj.velocity.x * dt
-                    obj.position.y += obj.velocity.y * dt
-                    obj.position.z += obj.velocity.z * dt
-                    
-                    # Add to trail
-                    if frame % 3 == 0:
-                        obj.trail.append(Vec3(obj.position.x, obj.position.y, obj.position.z))
-                        if len(obj.trail) > 150:
-                            obj.trail.pop(0)
-            
-            # STEP 4: Update velocities (second half)
-            for obj in objs:
-                if not obj.fixed:
-                    obj.velocity.x += obj.acc.x * dt * 0.5
-                    obj.velocity.y += obj.acc.y * dt * 0.5
-                    obj.velocity.z += obj.acc.z * dt * 0.5
-            
-            # Update grid every frame for smooth warping
-            if frame % 1 == 0:
-                grid_vertex_count = update_grid()
-        
-        # DRAW WARPED GRID
-        glUniform1i(glGetUniformLocation(shader, "isGrid"), 1)
-        glUniform1i(glGetUniformLocation(shader, "glow"), 0)
-        glUniform4f(color_loc, 0.3, 0.4, 0.7, 0.75)
-        
-        model = np.identity(4, dtype=np.float32)
-        glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-        
-        glLineWidth(1.5)
-        glBindVertexArray(grid_vao)
-        glDrawArrays(GL_LINES, 0, grid_vertex_count)
-        
-        # DRAW TRAILS
-        if show_trails:
-            for obj in objs:
-                if not obj.fixed and len(obj.trail) > 0:
-                    draw_trail(shader, obj, model_loc, color_loc)
-        
-        # DRAW OBJECTS
-        glUniform1i(glGetUniformLocation(shader, "isGrid"), 0)
-        
-        for obj in objs:
-            model = translate(obj.position)
-            glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
-            glUniform4f(color_loc, obj.color.r, obj.color.g, obj.color.b, obj.color.a)
-            glUniform1i(glGetUniformLocation(shader, "glow"), 1 if obj.glow else 0)
-            
-            glBindVertexArray(obj.vao)
-            glDrawArrays(GL_TRIANGLES, 0, obj.vertex_count // 3)
-        
+        step_physics(bodies)
+
+        glUseProgram(shader)
+
+        view = look_at(cam_pos, cam_pos+cam_front, cam_up)
+        glUniformMatrix4fv(glGetUniformLocation(shader,"view"),1,GL_FALSE,view)
+        glUniformMatrix4fv(glGetUniformLocation(shader,"projection"),1,GL_FALSE,projection)
+
+        for b in bodies:
+            model = np.identity(4, dtype=np.float32)
+            model[3][:3] = [b.pos.x, b.pos.y, b.pos.z]
+            glUniformMatrix4fv(glGetUniformLocation(shader,"model"),1,GL_FALSE,model)
+            glUniform4f(glGetUniformLocation(shader,"color"), *b.color)
+            glBindVertexArray(b.vao)
+            glDrawArrays(GL_TRIANGLES,0,b.count)
+
         glfw.swap_buffers(window)
         glfw.poll_events()
-        
-        frame += 1
-        if frame == 120:
-            E = calculate_total_energy(objs)
-            dE = abs((E - E0) / E0) * 100 if E0 != 0 else 0
-            print(f"⚡ {1.0/delta_time:.0f} FPS | Energy drift: {dE:.4f}% | Orbits stable ✓")
-    
-    for obj in objs:
-        obj.cleanup()
-    
-    glDeleteVertexArrays(1, [grid_vao])
-    glDeleteBuffers(1, [grid_vbo])
-    glfw.terminate()
-    print("\n✓ Simulation ended")
 
+    glfw.terminate()
 
 if __name__ == "__main__":
     main()
